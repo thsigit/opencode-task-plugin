@@ -13,15 +13,23 @@
  *      [!]  blocked
  */
 /**
+ * Turn plan-repo syncing on or off. Called by the plugin with the `sync`
+ * option (default false). Safe to call at any time; from 0.1.0 the plugin
+ * calls it once in setup before any tool runs.
+ */
+export declare function configureSync(enabled: boolean): void;
+/**
  * Pull the latest task changes from the remote.
  * Called by `listTasks()` so a new session always sees the current task list.
  * Non-fatal: returns a warning string on failure, empty string on success.
+ * No-op when sync is disabled (the 0.1.0 default).
  */
 export declare function pullTasks(): string;
 /**
  * Commit, pull, and push task changes to the remote.
  * Called by `sessionDone()` so closing a session publishes its work.
  * Non-fatal: returns a warning string on failure, empty string on success.
+ * No-op when sync is disabled (the 0.1.0 default).
  */
 export declare function pushTasks(): string;
 interface IndexEntry {

@@ -49,45 +49,15 @@ boxes are ticked. Two archived tasks hit exactly this and had to be moved by han
 When writing a new task, give it a real `## To Do` section. When a "complete" task
 refuses to archive, check its heading before anything else.
 
-## Step 5: publish the session
+## Step 5: publish the session (only if syncing is enabled)
 
-The task tree is a git clone of the bare repo on the Windows disk. **Publishing is on demand -
-there is no timer.** Nothing will push for you, so this step is what publishes
-the session:
+If the plugin is configured with `options.sync: true` and the plan tree is a
+git clone, `close_task` already committed, pulled and pushed — there is no
+separate `git push` to remember.
 
-    bash ~/.opencode/bin/sync-plan.sh
-
-Run it **after** `close_task`, since archiving is what changes the tree. It
-auto-commits local edits, fast-forwards from origin, and pushes - so it is both
-the publish and the converge step; there is no separate `git push` to remember.
-
-Exit `0` converged, `1` error, `2` skipped (mid-merge, lock held, or not on
-`main`). **Report a non-zero code to the user** - the session's work is still
-local, which means it is not on the bare repo: a Fedora WSL reset re-clones from
-`opencode-tasks.git`, and an unpublished edit is the one thing that cannot come
-back. `1` on a rebase conflict means two clones edited the same task file -
-restore/recovery territory since 2026-10-08, when Fedora became the only live
-worktree - and the script aborts rather than guess, which is the right call. The
-run log is `~/.opencode/plan/.git/sync-state.log`.
-
-Publishing lands on the bare repo on the Windows disk and stops there: the
-off-disk third copy at `homelab:/srv/repo/opencode-v2/tasks.git` is refreshed by
-a different command with a different job, `scripts/mirror-umbrella.sh`. Solo
-since 2026-10-08, "sync" here means publish-and-pull against that one bare repo,
-not fan-out to other machines.
-
-### Also publish mem0
-
-The mem0 store is a second git repo, and memories saved this session
-are the other thing worth keeping:
-
-    bash ~/.opencode/bin/sync-mem0.sh
-
-This matters more than it looks: `mem0-local.py add` writes a file and stops, so
-without this step every memory saved in this session is local-only and never
-reaches the bare repo.
-
-Run it too, but **do not let it block the close**. A mem0 sync failure is worth
-one line in the handoff note, never a reason to stall the session.
-
-Layout: `~/.opencode/mem0` is the working clone of `opencode-mem0.git`.
+If syncing is **not** enabled (the default), `close_task` left the session's
+work entirely local: archive moves, index rewrite, handoff note. Publishing is
+up to you — commit and push the plan directory yourself if it is a git repo,
+or back it up however you would. **Report to the user whether the work is
+published or still local.** An unpublished edit is the one thing that cannot
+come back, so do not end a session silent about it.

@@ -9,7 +9,7 @@
  */
 
 import { Plugin } from "@opencode/plugin";
-import { sessionDone, verify, listTasks, newTask, rebuildIndex } from "./task-manager.js";
+import { sessionDone, verify, listTasks, newTask, rebuildIndex, configureSync } from "./task-manager.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdirSync, readdirSync, copyFileSync } from "node:fs";
@@ -54,6 +54,15 @@ function installSkills() {
 export default Plugin.define({
   id: "opencode-task-plugin",
   async setup(ctx) {
+    // Plan-repo sync is opt-in since 0.1.0. Enable it in object-form config:
+    // { "package": "opencode-task-plugin", "options": { "sync": true } }
+    const syncEnabled = ctx.options?.sync === true;
+    configureSync(syncEnabled);
+    console.log(
+      `opencode-task-plugin: plan-repo sync ${syncEnabled ? "ENABLED" : "DISABLED"}` +
+        (syncEnabled ? "" : " (default) — enable with options { sync: true }"),
+    );
+
     // Distribute bundled skills into the global skills dir (idempotent).
     installSkills();
 

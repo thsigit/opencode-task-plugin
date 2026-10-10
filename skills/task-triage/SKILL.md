@@ -10,26 +10,13 @@ orchestrates those tools to pick the next piece of work.
 
 ## Workflow
 
-0. **Sync first, then read.** The task tree is a git clone of the bare repo on
-   the Windows disk (`opencode-tasks.git`), synced **on
-   demand — there is no timer**. Without this step you triage whatever was last
-   pulled rather than the current tree:
-
-       bash ~/.opencode/bin/sync-plan.sh
-
-   Exit `0` converged, `1` error, `2` skipped (mid-merge, lock held, or not on
-   `main`). A non-zero code is **not** fatal for triage: say the tree may be
-   stale, then continue with what is on disk. Never present a stale list as
-   current. The script also *commits* local edits, so re-run it after you change
-   anything — that is the whole push mechanism, and there is nothing else.
-
-   Solo since 2026-10-08: Fedora WSL is the only live worktree, so this is
-   publish-and-pull against a single bare repo on the Windows disk, not
-   host-to-host sync. It stays quiet when there is nothing new either way.
-
-   The **mem0** store is a second, separate git repo at `~/.opencode/mem0`,
-   converged by `sync-mem0.sh`. It is published by the `session-close` skill, so
-   triage does **not** need to touch it — pulling tasks does not pull memories, and that is deliberate.
+0. **Read the live tree.** Tasks live under `~/.opencode/plan/`. Plan-repo
+   syncing is **opt-in** (plugin option `sync: true`) and, when enabled, the
+   plugin has already pulled the latest changes by the time `tasks` runs — so
+   you can read the tree as current without a separate step. When syncing is
+   **not** configured (the default), read what is on disk and treat it as
+   current. Never present a stale list as current: if you do not know whether
+   the tree came from a remote, say so.
 
 1. Call the **`tasks`** tool (optionally with `verify: true`) to pull the current
    index. Each line shows a status marker and an `updated` date:

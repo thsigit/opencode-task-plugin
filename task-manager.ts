@@ -45,12 +45,21 @@ ensureDirs();
 
 // ── Git sync (plan repo) ──────────────────────────────────────────────────
 //
-// The plan tree is a git clone of a bare repo on the Windows disk. Each host
-// pulls before reading and pushes after writing, so the task list is always
-// fresh at session start and published at session close.
+// OPT-IN SINCE 0.1.0: syncing is DISABLED unless the plugin is loaded with
+// options { sync: true } (object-form config entry). The original auto-sync
+// pulled before every read and pushed after every write against a bare origin
+// each host cloned — useful on a private fleet, but surprising and risky as a
+// public default (it would commit, pull and push on a stranger's machine
+// without consent). Public installs therefore run purely local; private
+// installs re-enable sync by configuring the plugin with "sync": true.
+//
+// When enabled, the plan tree is expected to be a git clone of a bare origin.
+// Each host pulls before reading and pushes after writing, so the task list is
+// always fresh at session start and published at session close.
 //
 // Design rules:
-//   - Non-fatal: sync failures are warnings, never block the tool.
+//   - Sync is opt-in; a missing option means fully local operation.
+//   - Non-fatal at runtime: sync failures are warnings, never block the tool.
 //   - --ff only: never auto-merge. If diverged, warn and continue.
 //   - Commit first: so the working tree is clean for the pull.
 //   - session-index.json is gitignored, so `git add -A` won't stage it.
@@ -79,6 +88,20 @@ function runGit(args: string[]): GitResult {
 
 let gitRepoChecked = false;
 let isGitRepo = false;
+let syncEnabled = false;
+
+/**
+ * Turn plan-repo syncing on or off. Called by the plugin with the `sync`
+ * option (default false). Safe to call at any time; from 0.1.0 the plugin
+ * calls it once in setup before any tool runs.
+ */
+export function configureSync(enabled: boolean): void {
+  syncEnabled = Boolean(enabled);
+  if (!syncEnabled) {
+    gitRepoChecked = false;
+    isGitRepo = false;
+  }
+}
 
 function checkGitRepo(): boolean {
   if (!gitRepoChecked) {
@@ -92,8 +115,10 @@ function checkGitRepo(): boolean {
  * Pull the latest task changes from the remote.
  * Called by `listTasks()` so a new session always sees the current task list.
  * Non-fatal: returns a warning string on failure, empty string on success.
+ * No-op when sync is disabled (the 0.1.0 default).
  */
 export function pullTasks(): string {
+  if (!syncEnabled) return "";
   if (!checkGitRepo()) return "";
   const pull = runGit(["pull", "--ff-only", "origin", "main"]);
   if (!pull.ok) {
@@ -106,8 +131,10 @@ export function pullTasks(): string {
  * Commit, pull, and push task changes to the remote.
  * Called by `sessionDone()` so closing a session publishes its work.
  * Non-fatal: returns a warning string on failure, empty string on success.
+ * No-op when sync is disabled (the 0.1.0 default).
  */
 export function pushTasks(): string {
+  if (!syncEnabled) return "";
   if (!checkGitRepo()) return "";
   const results: string[] = [];
 

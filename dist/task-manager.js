@@ -1,0 +1,598 @@
+/**
+ * Core logic for opencode-task-plugin plugin.
+ *
+ * Finetuned conventions:
+ *  - Active tasks live in <BASE>/active/ with a `TASK-` prefix: active/TASK-<name>.md
+ *  - Completed tasks are moved to <BASE>/archive/ as TASK-<name>_YYYY-MM-DD[-N].md
+ *  - The handoff prose lives in <BASE>/session-handoff.md (no embedded JSON)
+ *  - The canonical task index is <BASE>/session-index.json (atomic tmp+rename)
+ *  - To Do checkbox markers:
+ *      [ ]  pending
+ *      [~]  in-progress
+ *      [x]  completed   (all boxes [x] => task is archived by `session is done`)
+ *      [!]  blocked
+ */
+import * as fs from "fs";
+import * as path from "path";
+import { spawnSync } from "child_process";
+// ── Paths ────────────────────────────────────────────────────────────────
+const HOME = (await import("os")).homedir();
+const BASE = path.join(HOME, ".opencode", "plan");
+const ACTIVE = path.join(BASE, "active");
+const ARCHIVE = path.join(BASE, "archive");
+const HANDOFF = path.join(BASE, "session-handoff.md");
+const INDEX = path.join(BASE, "session-index.json");
+// Tasks whose last edit is older than this many days and are still in-progress
+// are flagged by `verify` as stale.
+const STALE_DAYS = 7;
+// ── Prefixes ─────────────────────────────────────────────────────────────
+const TASK_PREFIX = "TASK-";
+// ── Startup guards ───────────────────────────────────────────────────────
+function ensureDirs() {
+    for (const dir of [BASE, ACTIVE, ARCHIVE]) {
+        if (!fs.existsSync(dir))
+            fs.mkdirSync(dir, { recursive: true });
+    }
+}
+ensureDirs();
+function runGit(args) {
+    const r = spawnSync("git", args, {
+        cwd: BASE,
+        encoding: "utf-8",
+        timeout: 30_000,
+    });
+    if (r.error) {
+        return { ok: false, stdout: "", stderr: r.error.message };
+    }
+    return {
+        ok: r.status === 0,
+        stdout: (r.stdout || "").trim(),
+        stderr: (r.stderr || "").trim(),
+    };
+}
+let gitRepoChecked = false;
+let isGitRepo = false;
+function checkGitRepo() {
+    if (!gitRepoChecked) {
+        isGitRepo = runGit(["rev-parse", "--is-inside-work-tree"]).ok;
+        gitRepoChecked = true;
+    }
+    return isGitRepo;
+}
+/**
+ * Pull the latest task changes from the remote.
+ * Called by `listTasks()` so a new session always sees the current task list.
+ * Non-fatal: returns a warning string on failure, empty string on success.
+ */
+export function pullTasks() {
+    if (!checkGitRepo())
+        return "";
+    const pull = runGit(["pull", "--ff-only", "origin", "main"]);
+    if (!pull.ok) {
+        return `sync: pull failed — ${pull.stderr.split("\n")[0]}`;
+    }
+    return "";
+}
+/**
+ * Commit, pull, and push task changes to the remote.
+ * Called by `sessionDone()` so closing a session publishes its work.
+ * Non-fatal: returns a warning string on failure, empty string on success.
+ */
+export function pushTasks() {
+    if (!checkGitRepo())
+        return "";
+    const results = [];
+    // Commit local changes (session-index.json is gitignored, so this only
+    // commits task files and the handoff).
+    runGit(["add", "-A"]);
+    const staged = runGit(["diff", "--cached", "--quiet"]);
+    if (!staged.ok) {
+        const commit = runGit(["commit", "-m", `plan: auto-sync (${new Date().toISOString()})`]);
+        if (!commit.ok) {
+            results.push(`sync: commit failed — ${commit.stderr.split("\n")[0]}`);
+        }
+    }
+    // Pull (fast-forward only) — another host may have pushed while we worked.
+    const pull = runGit(["pull", "--ff-only", "origin", "main"]);
+    if (!pull.ok) {
+        results.push(`sync: pull failed — ${pull.stderr.split("\n")[0]}`);
+    }
+    // Push.
+    const push = runGit(["push", "origin", "main"]);
+    if (!push.ok) {
+        results.push(`sync: push failed — ${push.stderr.split("\n")[0]}`);
+    }
+    return results.join("\n");
+}
+// ── Helpers ──────────────────────────────────────────────────────────────
+function basename(fp) {
+    return path.basename(fp);
+}
+function stripPrefix(name) {
+    if (name.startsWith(TASK_PREFIX))
+        return name.slice(TASK_PREFIX.length);
+    return name;
+}
+/** Active file name from any task name. */
+function toTaskName(name) {
+    return TASK_PREFIX + stripPrefix(name);
+}
+/** Archive file base name (without collision counter): TASK-<name>_YYYY-MM-DD.md */
+function archiveBaseName(name, date) {
+    return `${TASK_PREFIX}${stripPrefix(name)}_${date}`;
+}
+/** Archive file base name WITHOUT date — used by verify to match any dated copy. */
+function archiveNameNoDate(name) {
+    return `${TASK_PREFIX}${stripPrefix(name)}`;
+}
+function activeFiles() {
+    try {
+        return fs
+            .readdirSync(ACTIVE)
+            .filter((f) => f.endsWith(".md"))
+            .map((f) => path.join(ACTIVE, f))
+            .sort();
+    }
+    catch {
+        return [];
+    }
+}
+function todoSection(content) {
+    const header = /^#+\s+To Do\s*$/m.exec(content);
+    if (!header)
+        return null;
+    const level = (header[0].match(/^#+/) || [""])[0].length;
+    // Skip the header line plus its trailing newline.
+    const afterHeader = header.index + header[0].length + 1;
+    const section = content.slice(afterHeader);
+    // Stop at the next heading of the SAME OR HIGHER level only. A lower-level
+    // heading (e.g. "### 1. ..." under "## To Do") is a subsection of the To Do
+    // list and must not terminate it -- treating it as a terminator truncated the
+    // section to a blank line, so checkboxMarkers() found nothing and the task
+    // reported "pending" forever no matter how many boxes were checked.
+    const nextHeader = new RegExp("^#{1," + level + "}\\s+\\S", "m").exec(section);
+    if (nextHeader)
+        return section.slice(0, nextHeader.index);
+    return section;
+}
+function checkboxMarkers(content) {
+    const section = todoSection(content);
+    if (!section)
+        return [];
+    return section.match(/-\s+\[(.)\]/g) || [];
+}
+/** A task is "done" (ready to archive) only when every To Do box is [x]. */
+function isDone(filePath) {
+    const markers = checkboxMarkers(fs.readFileSync(filePath, "utf-8"));
+    if (markers.length === 0)
+        return false;
+    return markers.every((b) => b.includes("[x]"));
+}
+/** Derive a granular status from the To Do markers. */
+function deriveStatus(filePath) {
+    const markers = checkboxMarkers(fs.readFileSync(filePath, "utf-8"));
+    if (markers.length === 0)
+        return "pending";
+    if (markers.every((b) => b.includes("[x]")))
+        return "completed";
+    if (markers.some((b) => b.includes("[!]")))
+        return "blocked";
+    if (markers.some((b) => b.includes("[~]")))
+        return "in-progress";
+    return "pending";
+}
+function deriveSummary(filePath) {
+    const content = fs.readFileSync(filePath, "utf-8");
+    for (const line of content.split("\n")) {
+        const stripped = line.trim();
+        if (!stripped)
+            continue;
+        if (stripped.startsWith("#")) {
+            const title = stripped.replace(/^#+\s*/, "").trim();
+            return title.slice(0, 160);
+        }
+        return stripped.slice(0, 160);
+    }
+    return "Task";
+}
+function buffersEqual(a, b) {
+    if (a.length !== b.length)
+        return false;
+    for (let i = 0; i < a.length; i++) {
+        if (a[i] !== b[i])
+            return false;
+    }
+    return true;
+}
+function todayISO() {
+    return new Date().toISOString().slice(0, 10);
+}
+function isoStamp(d) {
+    return d.toISOString();
+}
+/** A free archive destination for `name` on `date`, collision-safe. */
+function archiveDest(name, date) {
+    let candidate = `${archiveBaseName(name, date)}.md`;
+    let i = 2;
+    while (fs.existsSync(path.join(ARCHIVE, candidate))) {
+        candidate = `${archiveBaseName(name, date)}-${i}.md`;
+        i++;
+    }
+    return candidate;
+}
+function statTimes(filePath) {
+    try {
+        const st = fs.statSync(filePath);
+        return { created: isoStamp(st.birthtimeMs ? st.birthtime : st.ctime), updated: isoStamp(st.mtime) };
+    }
+    catch {
+        const now = new Date();
+        return { created: isoStamp(now), updated: isoStamp(now) };
+    }
+}
+function parseIndex() {
+    try {
+        const data = JSON.parse(fs.readFileSync(INDEX, "utf-8"));
+        if (data && Array.isArray(data.tasks))
+            return data;
+        return null;
+    }
+    catch {
+        return null;
+    }
+}
+/** Atomic write: tmp file + rename to avoid clobbering on concurrent hosts. */
+function writeIndex(tasks) {
+    const tmp = `${INDEX}.tmp`;
+    fs.writeFileSync(tmp, JSON.stringify({ tasks }, null, 2) + "\n", "utf-8");
+    fs.renameSync(tmp, INDEX);
+    console.log(`Task index written: ${tasks.length} active task(s) -> ${basename(INDEX)}`);
+}
+/** Rebuild the entire index from the active/ directory (canonical source). */
+export function rebuildIndex() {
+    const tasks = [];
+    for (const filePath of activeFiles()) {
+        const name = basename(filePath);
+        const times = statTimes(filePath);
+        tasks.push({
+            file: name,
+            status: deriveStatus(filePath),
+            summary: deriveSummary(filePath),
+            created: times.created,
+            updated: times.updated,
+        });
+    }
+    tasks.sort((a, b) => a.file.localeCompare(b.file));
+    writeIndex(tasks);
+    return tasks;
+}
+// ── Handoff prose append (session is done) ───────────────────────────────
+function appendHandoff(block) {
+    try {
+        const prev = fs.existsSync(HANDOFF) ? fs.readFileSync(HANDOFF, "utf-8") : "";
+        const sep = prev.length > 0 && !prev.endsWith("\n") ? "\n\n" : prev.length > 0 ? "\n" : "";
+        fs.writeFileSync(HANDOFF, prev + sep + block, "utf-8");
+    }
+    catch (e) {
+        console.error(`WARN: could not append to handoff: ${e.message}`);
+    }
+}
+// ── Archive / Move Logic ─────────────────────────────────────────────────
+export function sessionDone() {
+    const date = todayISO();
+    const archived = [];
+    const kept = [];
+    for (const filePath of activeFiles()) {
+        const name = basename(filePath);
+        if (!isDone(filePath)) {
+            kept.push(name);
+            continue;
+        }
+        const target = archiveDest(name, date);
+        const destPath = path.join(ARCHIVE, target);
+        if (fs.existsSync(destPath)) {
+            // dest only exists if it is byte-identical (archiveDest skips existing)
+            const same = buffersEqual(fs.readFileSync(filePath), fs.readFileSync(destPath));
+            if (!same) {
+                const err = `ERROR: archive target ${target} exists with different content; ${name} left untouched`;
+                console.error(err);
+                kept.push(name);
+                continue;
+            }
+            fs.unlinkSync(filePath);
+            archived.push({ name, dest: target, leftover: true });
+        }
+        else {
+            fs.renameSync(filePath, destPath);
+            if (fs.existsSync(filePath)) {
+                console.error(`ERROR: fail-safe re-check — ${name} still present after move`);
+                kept.push(name);
+                continue;
+            }
+            archived.push({ name, dest: target, leftover: false });
+        }
+    }
+    const lines = [];
+    for (const { name, leftover } of archived) {
+        const label = leftover ? " (leftover removed, already in archive)" : "";
+        lines.push(`"${stripPrefix(name)}" is marked done and moved to archive/${archiveBaseName(name, date)}.md${label}`);
+    }
+    lines.push(`\nArchived: ${archived.map((a) => a.dest).join(", ") || "none"}`);
+    lines.push(`Remaining: ${kept.join(", ") || "none"}`);
+    rebuildIndex();
+    // Append a short session-end note to the handoff prose.
+    const stamp = todayISO();
+    appendHandoff(`## Session archived (${stamp})\n\n` +
+        `- Archived ${archived.length} task(s)${archived.length ? ": " + archived.map((a) => a.dest).join(", ") : ""}.\n` +
+        `- Remaining ${kept.length} active task(s).\n`);
+    // Publish the session's work to the remote. Non-fatal: a sync failure is
+    // a warning, never a blocker — the archive already happened locally.
+    const syncMsg = pushTasks();
+    if (syncMsg) {
+        lines.push(syncMsg);
+    }
+    return lines.join("\n");
+}
+// ── New task scaffold ─────────────────────────────────────────────────────
+/** Normalize a human task name into the `TASK-<slug>.md` active filename. */
+function slugify(name) {
+    return name
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, "-")
+        .replace(/^-+|-+$/g, "");
+}
+export function newTask(input) {
+    const raw = input.name;
+    if (!raw || !raw.trim())
+        return "ERROR: task name is required";
+    const file = `${TASK_PREFIX}${slugify(raw)}.md`;
+    const filePath = path.join(ACTIVE, file);
+    if (fs.existsSync(filePath))
+        return `ERROR: ${file} already exists in active/`;
+    const title = raw.trim().replace(/[-_]+/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+    const firstTodo = input.summary?.trim() || "Describe this task";
+    const statusMarker = input.status === "in-progress" ? "[~]" : input.status === "blocked" ? "[!]" : "[ ]";
+    const body = `# ${title}\n\n` +
+        `**Created:** ${isoStamp(new Date())}\n\n` +
+        `## To Do\n` +
+        `- ${statusMarker} ${firstTodo}\n`;
+    fs.writeFileSync(filePath, body, "utf-8");
+    rebuildIndex();
+    return `Created active/${file} and registered it in session-index.json.`;
+}
+// ── Verify Logic ─────────────────────────────────────────────────────────
+export function verify() {
+    const results = [];
+    const archiveFiles = fs.existsSync(ARCHIVE) ? fs.readdirSync(ARCHIVE) : [];
+    const now = Date.now();
+    const staleMs = STALE_DAYS * 24 * 60 * 60 * 1000;
+    for (const filePath of activeFiles()) {
+        const name = basename(filePath);
+        const matchBase = archiveNameNoDate(name);
+        const matches = archiveFiles.filter((f) => f.startsWith(matchBase) && f.endsWith(".md"));
+        if (matches.length > 0) {
+            const archivePath = path.join(ARCHIVE, matches[0]);
+            const same = buffersEqual(fs.readFileSync(filePath), fs.readFileSync(archivePath));
+            results.push({ kind: same ? "orphan" : "collision", name, dest: matches[0], same });
+        }
+        else if (isDone(filePath)) {
+            results.push({ kind: "ready-to-archive", name, dest: `${archiveBaseName(name, todayISO())}.md`, same: false });
+        }
+        else {
+            // Flag stale in-progress tasks.
+            const status = deriveStatus(filePath);
+            if (status === "in-progress") {
+                try {
+                    const mtime = fs.statSync(filePath).mtimeMs;
+                    if (now - mtime > staleMs) {
+                        results.push({ kind: "stale-in-progress", name, dest: "", same: false });
+                    }
+                }
+                catch {
+                    /* ignore */
+                }
+            }
+        }
+    }
+    if (results.length === 0) {
+        return "OK: no orphans, no collisions, no ready-to-archive tasks, no stale in-progress tasks";
+    }
+    const lines = [];
+    for (const r of results) {
+        if (r.kind === "orphan") {
+            lines.push(`ORPHAN: '${r.name}' also exists as '${r.dest}' in archive/ (identical -> active copy is a leftover of a cp, not a mv)`);
+        }
+        else if (r.kind === "collision") {
+            lines.push(`COLLISION: '${r.name}' vs '${r.dest}' in archive/ with DIFFERENT content (do NOT remove; needs manual attention)`);
+        }
+        else if (r.kind === "ready-to-archive") {
+            lines.push(`READY-TO-ARCHIVE: '${r.name}' (all To Do checked; archive as '${r.dest}')`);
+        }
+        else {
+            lines.push(`STALE-IN-PROGRESS: '${r.name}' has not been edited in ${STALE_DAYS}+ days (check if still active or archive it)`);
+        }
+    }
+    return lines.join("\n");
+}
+// ── Tasks List Logic ─────────────────────────────────────────────────────
+/**
+ * Summarise the head of session-handoff.md for the `tasks` tool.
+ *
+ * WHY THIS EXISTS
+ *   `tasks` is the first tool a new session reaches for, and until 2026-09-30 it
+ *   returned a bare task list. session-handoff.md is the only durable record of
+ *   what the previous session actually established — the traps, the retractions,
+ *   the pinned errors in a spec — and nothing read it. plan-manager only ever
+ *   *appended* to it. That is how three copies of it went stale simultaneously
+ *   while the tool that should have surfaced it reported a healthy task list.
+ *
+ * WHAT IT DOES AND DOES NOT DO
+ *   It prints a bounded excerpt, never the whole file. A handoff can run to
+ *   tens of KB, and `tasks` is called often; dumping it whole would be a context
+ *   tax on every call for a document that matters once, at session start. So:
+ *   the title block, the most recent section headings, and a pointer to the
+ *   path. The agent reads the file itself when it needs the rest.
+ *
+ *   HEADING TOLERANCE — WHY THIS HAS FALLBACKS
+ *   The first version matched exactly two markers: a `**Date:**` line and
+ *   `## <n>.` headings. Both are conventions, not requirements, and nothing
+ *   enforced them. The 2026-10-01 SSH session wrote a handoff in a different
+ *   shape — `# Handoff: ...`, then `## Overview` / `## Work Completed` /
+ *   `### 1. ...` — and the whole block silently vanished from `tasks` while the
+ *   6.8 KB of content sat on disk unread. Same failure class as the original
+ *   bug: a reader that cannot see the thing it exists to surface, failing
+ *   quietly.
+ *
+ *   So the reader degrades instead of giving up. It tries, in order:
+ *     1. `**Date:**` line and `## <n>.` headings (canonical)
+ *     2. any `## ` heading at all, de-duplicated
+ *     3. a bare pointer with the byte count — better one line than nothing
+ *   A writer choosing a different heading style can no longer break the reader.
+ *
+ *   A missing or empty handoff is normal (a host that has never run
+ *   close_task). It is reported as one line and never treated as an error —
+ *   this must not become a new thing that fails.
+ *
+ *   WORDING — WHY THE POINTER IS AN IMPERATIVE ADDRESSED TO THE AGENT
+ *   The first version's pointer read "read it before acting on the tasks
+ *   below" as embedded prose inside a descriptive summary. On 2026-10-09 an
+ *   agent hit that line, treated it as narration to relay to the user ("Read
+ *   session-handoff.md before acting on tasks — do you want me to?"), and
+ *   presented the task list without ever opening the file — the exact
+ *   read-the-handoff behaviour this block exists to cause. Prose addressed to
+ *   no one in particular gets quoted, not obeyed. So the output now names its
+ *   addressee (the agent, not the user), demands the action explicitly before
+ *   the task list is shown, and calls out relaying the pointer as the failure
+ *   mode. If this line is ever "improved", keep it an instruction to the
+ *   reader, not a description of one.
+ */
+function handoffSummary() {
+    if (!fs.existsSync(HANDOFF))
+        return null;
+    let text;
+    let bytes = 0;
+    try {
+        text = fs.readFileSync(HANDOFF, "utf8");
+        bytes = Buffer.byteLength(text, "utf8");
+    }
+    catch {
+        return null;
+    }
+    const lines = text.split("\n");
+    // The datestamped heading the previous session wrote, e.g. "**Date:** 2026-09-30".
+    const dated = lines.find((l) => /^\*\*Date:\*\*/.test(l)) ?? null;
+    // Canonical: numbered top-level sections, file order == most recent last.
+    const canonical = lines.filter((l) => /^##\s+\d+\./.test(l));
+    // Fallback: any `## ` heading, de-duplicated, order preserved. `###` is
+    // excluded so a `## Work Completed` with twelve `### 1.` subsections does not
+    // flood the excerpt.
+    const fallback = dedupeHeadings(lines
+        .filter((l) => /^##\s+\S/.test(l))
+        .map((l) => l.replace(/^##\s+/, "").trim()));
+    const sections = (canonical.length > 0 ? canonical : fallback).slice(-8);
+    if (text.trim().length === 0)
+        return null;
+    const out = [
+        "## Session Handoff — AGENT ACTION REQUIRED: read the handoff file (path below) before you present the task list",
+    ];
+    // A `**Date:**` line is the strongest signal of recency; fall back to the
+    // document's own mtime, and never to nothing.
+    if (dated) {
+        out.push(dated.trim());
+    }
+    else {
+        try {
+            const when = fs.statSync(HANDOFF).mtime.toISOString().slice(0, 10);
+            out.push(`**Date:** ${when} (from file mtime; no **Date:** line in the handoff)`);
+        }
+        catch {
+            /* unreadable mtime is not worth failing over */
+        }
+    }
+    if (sections.length > 0) {
+        out.push("");
+        out.push("Most recent session recorded:");
+        for (const s of sections)
+            out.push(`- ${s.replace(/^##\s+/, "").trim()}`);
+    }
+    else {
+        // Content exists but no heading matched even the fallback. Say so with a
+        // size, so the reader knows there is something to go read.
+        out.push("");
+        out.push(`(no section headings found in ${bytes} bytes — read the file directly)`);
+    }
+    out.push("");
+    out.push(`Full narrative: ${HANDOFF}\n` +
+        `AGENT INSTRUCTION (not for the user): before outputting the task list below, ` +
+        `use the read tool on that path and act on what it says. It records what the ` +
+        `last session established, including corrections to earlier claims. Relaying ` +
+        `this pointer to the user instead of reading the file does not comply.`);
+    return out.join("\n");
+}
+/** De-duplicate heading titles while preserving first-seen order. */
+function dedupeHeadings(titles) {
+    const seen = new Set();
+    const out = [];
+    for (const t of titles) {
+        if (seen.has(t))
+            continue;
+        seen.add(t);
+        out.push(t);
+    }
+    return out;
+}
+export function listTasks() {
+    // Pull the latest task changes from the remote so a new session always sees
+    // the current task list. Non-fatal: a sync failure is a warning, never a
+    // blocker — the local list is still shown.
+    const syncMsg = pullTasks();
+    let index = parseIndex();
+    if (!index || !Array.isArray(index.tasks)) {
+        // session-index.json is host-local and untracked (see the task tree's
+        // .gitignore), so a `git pull` can remove it and a first run can precede the
+        // load-time rebuild. Regenerate from active/, the canonical source, rather
+        // than reporting an empty list that reads like data loss.
+        try {
+            rebuildIndex();
+            index = parseIndex();
+        }
+        catch {
+            // fall through to the message below
+        }
+    }
+    const lines = [];
+    // Sync status comes first so a failed pull is impossible to miss.
+    if (syncMsg) {
+        lines.push(syncMsg);
+        lines.push("");
+    }
+    // The handoff comes FIRST. A task list without it reads as "this is all you
+    // need to know", which is exactly how a stale handoff survived three syncs.
+    const handoff = handoffSummary();
+    if (handoff) {
+        lines.push(handoff);
+        lines.push("");
+        lines.push("---");
+        lines.push("");
+    }
+    if (!index || !Array.isArray(index.tasks)) {
+        lines.push("No tasks indexed in session-index.json.");
+        return lines.join("\n");
+    }
+    lines.push("## Task Index (from session-index.json)");
+    for (const t of index.tasks) {
+        const when = t.updated ? ` (updated ${t.updated.slice(0, 10)})` : "";
+        lines.push(`- ${t.file} [${t.status}]${when} — ${t.summary}`);
+    }
+    // Cross-check: find unindexed active files
+    const indexed = new Set(index.tasks.map((t) => t.file));
+    const unindexed = activeFiles().filter((f) => !indexed.has(basename(f)));
+    if (unindexed.length > 0) {
+        lines.push("\n## Unindexed task files (not in index)");
+        for (const f of unindexed) {
+            lines.push(`- ${basename(f)}`);
+        }
+    }
+    return lines.join("\n");
+}

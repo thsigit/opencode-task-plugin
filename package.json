@@ -1,0 +1,26 @@
+{
+  "name": "opencode-task-plugin",
+  "version": "1.0.0",
+  "description": "Plan manager plugin (OpenCode V2 API) - manages plans in ~/.opencode/plan/",
+  "license": "MIT",
+  "type": "module",
+  "main": "dist/index.js",
+  "exports": {
+    ".": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch"
+  },
+  "files": [
+    "dist",
+    "skills"
+  ],
+  "dependencies": {},
+  "devDependencies": {
+    "typescript": "^5.0.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

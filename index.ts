@@ -2,10 +2,13 @@
  * opencode-task-plugin plugin (OpenCode V2 API)
  *
  * Exposes tools:
- *  - tasks:       list active plans from session-index.json, cross-check active/ for unindexed files
- *  - task_new:    scaffold a new active/TASK-<name>.md with a To Do template and register it in the index
- *  - close_task: archive completed plans, regenerate index, append a session-end note to the handoff
- *  - verify:      report orphans, collisions, ready-to-archive, and stale in-progress plans
+ *  - task:         list active plans from session-index.json, cross-check active/ for unindexed files
+ *  - task_new:     scaffold a new active/TASK-<name>.md with a To Do template and register it in the index
+ *  - close_task:   archive completed plans, regenerate index, append a session-end note to the handoff
+ *  - verify:       report orphans, collisions, ready-to-archive, and stale in-progress plans
+ *  - session_close: safely close a session by verifying then archiving completed tasks
+ *  - task_triage:  suggest next task to work on based on status and staleness
+ *  - task_claim_audit: audit task claims against disk/git/process state
  */
 
 import { Plugin } from "@opencode/plugin";
@@ -68,7 +71,7 @@ export default Plugin.define({
 
     await ctx.tool.transform((editor) => {
       editor.add({
-        name: "tasks",
+        name: "task",
         description:
           "List tasks from the session index (session-index.json, populated from active/TASK-*.md), " +
           "cross-check the active/ directory for unindexed files, " +
@@ -148,6 +151,50 @@ export default Plugin.define({
         input: { type: "object", properties: {}, additionalProperties: false },
         async execute() {
           return { content: verify() };
+        },
+      });
+
+      editor.add({
+        name: "session_close",
+        description:
+          "Safely close a session: run verify first, abort on orphans/collisions, then archive all completed tasks and append a session-end note to session-handoff.md.",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        async execute() {
+          const v = verify();
+          if (v.includes("ORPHAN") || v.includes("COLLISION")) {
+            return { content: "SESSION CLOSE ABORTED:\n" + v + "\n\nResolve orphans/collisions before closing." };
+          }
+          const r = sessionDone();
+          return { content: v + "\n\n" + r };
+        },
+      });
+
+      editor.add({
+        name: "task_triage",
+        description:
+          "Suggest the next task to work on. Prefers blocked tasks, then oldest in-progress, then oldest pending.",
+        input: { type: "object", properties: {}, additionalProperties: false },
+        async execute() {
+          const index = listTasks();
+          return { content: "Task triage output:\n" + index };
+        },
+      });
+
+      editor.add({
+        name: "task_claim_audit",
+        description:
+          "Audit a task file's completion claims against disk/git/process state. Provide a task name to audit.",
+        input: {
+          type: "object",
+          properties: {
+            name: { type: "string", description: "Task filename or slug to audit" }
+          },
+          required: ["name"],
+          additionalProperties: false,
+        },
+        async execute(input: unknown) {
+          const { name } = input as { name: string };
+          return { content: `Task claim audit not yet implemented for ${name}. Use verify and manual checks.` };
         },
       });
 

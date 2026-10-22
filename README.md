@@ -1,4 +1,4 @@
-# OpenCode Plan Manager
+# OpenCode Task Plugin
 
 **Plan → task → todos, as files you own.**
 
@@ -8,7 +8,7 @@ durable planning layer: active tasks as plain markdown under
 tools that keep them honest.
 
 > Package, plugin id and directory are all `opencode-task-plugin`. The product
-> name is **OpenCode Plan Manager**; the vocabulary underneath is deliberately
+> name is **OpenCode Task Plugin**; the vocabulary underneath is deliberately
 > `task` (see *Why `plan/` and `TASK-*.md`?*).
 
 ## The mental model: plan → task → todos

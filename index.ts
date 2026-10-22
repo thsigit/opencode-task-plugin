@@ -127,7 +127,7 @@ export default Plugin.define({
       });
 
       editor.add({
-        name: "close_task",
+        name: "task_close",
         description:
           "Verify tasks (orphans, collisions, ready-to-archive, stale), then archive all completed tasks " +
           "(every checkbox in ## To Do is - [x]) by moving them from active/ to archive/ as " +
@@ -143,7 +143,7 @@ export default Plugin.define({
       });
 
       editor.add({
-        name: "verify",
+        name: "task_verify",
         description:
           "Scan active task files for orphans (active copy beside an identical archive copy), " +
           "collisions (different content in archive/), ready-to-archive tasks (all To Do checked but not yet moved), " +

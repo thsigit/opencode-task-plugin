@@ -507,54 +507,8 @@ export function verify(): string {
 
 /**
  * Summarise the head of session-handoff.md for the `tasks` tool.
- *
- * WHY THIS EXISTS
- *   `tasks` is the first tool a new session reaches for, and until 2026-09-30 it
- *   returned a bare task list. session-handoff.md is the only durable record of
- *   what the previous session actually established — the traps, the retractions,
- *   the pinned errors in a spec — and nothing read it. plan-manager only ever
- *   *appended* to it. That is how three copies of it went stale simultaneously
- *   while the tool that should have surfaced it reported a healthy task list.
- *
- * WHAT IT DOES AND DOES NOT DO
- *   It prints a bounded excerpt, never the whole file. A handoff can run to
- *   tens of KB, and `tasks` is called often; dumping it whole would be a context
- *   tax on every call for a document that matters once, at session start. So:
- *   the title block, the most recent section headings, and a pointer to the
- *   path. The agent reads the file itself when it needs the rest.
- *
- *   HEADING TOLERANCE — WHY THIS HAS FALLBACKS
- *   The first version matched exactly two markers: a `**Date:**` line and
- *   `## <n>.` headings. Both are conventions, not requirements, and nothing
- *   enforced them. The 2026-10-01 SSH session wrote a handoff in a different
- *   shape — `# Handoff: ...`, then `## Overview` / `## Work Completed` /
- *   `### 1. ...` — and the whole block silently vanished from `tasks` while the
- *   6.8 KB of content sat on disk unread. Same failure class as the original
- *   bug: a reader that cannot see the thing it exists to surface, failing
- *   quietly.
- *
- *   So the reader degrades instead of giving up. It tries, in order:
- *     1. `**Date:**` line and `## <n>.` headings (canonical)
- *     2. any `## ` heading at all, de-duplicated
- *     3. a bare pointer with the byte count — better one line than nothing
- *   A writer choosing a different heading style can no longer break the reader.
- *
- *   A missing or empty handoff is normal (a host that has never run
- *   close_task). It is reported as one line and never treated as an error —
- *   this must not become a new thing that fails.
- *
- *   WORDING — WHY THE POINTER IS AN IMPERATIVE ADDRESSED TO THE AGENT
- *   The first version's pointer read "read it before acting on the tasks
- *   below" as embedded prose inside a descriptive summary. On 2026-10-09 an
- *   agent hit that line, treated it as narration to relay to the user ("Read
- *   session-handoff.md before acting on tasks — do you want me to?"), and
- *   presented the task list without ever opening the file — the exact
- *   read-the-handoff behaviour this block exists to cause. Prose addressed to
- *   no one in particular gets quoted, not obeyed. So the output now names its
- *   addressee (the agent, not the user), demands the action explicitly before
- *   the task list is shown, and calls out relaying the pointer as the failure
- *   mode. If this line is ever "improved", keep it an instruction to the
- *   reader, not a description of one.
+ * Prints a bounded excerpt (title, recent headings, path pointer).
+ * The agent reads the full file separately when needed.
  */
 function handoffSummary(): string | null {
   if (!fs.existsSync(HANDOFF)) return null;

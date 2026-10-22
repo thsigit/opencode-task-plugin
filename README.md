@@ -36,8 +36,8 @@ split tells you which layer you are looking at, so it was left alone.
 | --- | --- |
 | `tasks` | Lists tasks from `session-index.json`, cross-checks `active/` for unindexed files, and prefixes the current session handoff so you read it before acting. Optional `verify: true` appends a full scan. |
 | `task_new` | Scaffolds `active/TASK-<slug>.md` with a `## To Do` heading and registers it in the index. |
-| `close_task` | Runs `verify`, then archives every fully-checked task to `archive/TASK-<name>_YYYY-MM-DD[-N].md`, rebuilds the index, and appends a session-end note to the handoff. |
-| `verify` | Reports orphans, collisions, ready-to-archive tasks, and stale in-progress tasks. |
+| `task_close` | Runs `task_verify`, then archives every fully-checked task to `archive/TASK-<name>_YYYY-MM-DD[-N].md`, rebuilds the index, and appends a session-end note to the handoff. |
+| `task_verify` | Reports orphans, collisions, ready-to-archive tasks, and stale in-progress tasks. |
 
 ## Why the handoff matters
 
@@ -49,27 +49,45 @@ before reporting. The handoff is where corrections, traps and pinned errors
 live. (Hardened 2026-10-09 after an agent quoted the pointer to the user
 instead of opening the file.)
 
-## Install
+## How to install this plugin
 
-Requires **Node.js ≥ 20** and a POSIX shell with `git` available.
+`opencode-task-plugin` auto-discovers from the `plugins/` directory — no `opencode.json` registration is required.
 
-**Via npm** — add the package to the `plugin` array in
-`~/.config/opencode/opencode.json`:
-
-```json
-{
-  "plugin": ["opencode-task-plugin"]
-}
-```
-
-**From source** — clone into the plugin directory:
+### Quick install (recommended)
 
 ```sh
+# From a host where the plugin is already built (e.g., fedoraWSL)
+rsync -a opencode-task-plugin /home/sigit/.config/opencode/plugins/
+
+# Or clone fresh from GitHub
 git clone https://github.com/thsigit/opencode-task-plugin \
   ~/.config/opencode/plugins/opencode-task-plugin
 ```
 
-Then restart OpenCode. The four tools appear in the tool list.
+### Verify installation
+
+Start OpenCode and confirm the tools appear:
+
+```bash
+opencode task_new "My test task"
+opencode task_verify    # Scans for orphans/collisions/stale tasks
+opencode task_close     # Verifies then archives completed tasks
+opencode session_close  # Closes session safely
+```
+
+### No `opencode.json` entry needed
+
+Unlike many plugins, `opencode-task-plugin` loads from the `plugins/` directory alone. Adding `"plugin": ["opencode-task-plugin"]` to `~/.config/opencode/opencode.json` is optional and only required if you want to explicit-register it (evidence shows it loads without it on debianWSL).
+
+### Build from source (if needed)
+
+```sh
+cd /home/sigit/.config/opencode/plugins/opencode-task-plugin
+npm ci              # install dependencies
+npm run build       # tsc -> dist/
+```
+
+The `dist/` directory is committed, so a build step is usually unnecessary — the plugin bundles itself.
 
 ## Layout
 

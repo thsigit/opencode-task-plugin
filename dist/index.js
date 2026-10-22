@@ -86,6 +86,28 @@ export default Plugin.define({
                 },
             });
             editor.add({
+                name: "task_list",
+                description: "List tasks from the session index (session-index.json, populated from active/TASK-*.md), " +
+                    "cross-check the active/ directory for unindexed files, and optionally run verify scan for orphans/collisions/ready-to-archive/stale tasks.",
+                input: {
+                    type: "object",
+                    properties: {
+                        verify: {
+                            type: "boolean",
+                            description: "Also run verify scan (orphans, collisions, ready-to-archive, stale in-progress)",
+                        },
+                    },
+                    additionalProperties: false,
+                },
+                async execute(input) {
+                    let output = listTasks();
+                    if (input?.verify) {
+                        output += "\n\n" + verify();
+                    }
+                    return { content: output };
+                },
+            });
+            editor.add({
                 name: "task_new",
                 description: "Create a new task: scaffold active/TASK-<slug>.md with a '## To Do' template " +
                     "and register it in session-index.json. Use when the user asks to add a task.",

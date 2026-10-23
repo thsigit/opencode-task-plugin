@@ -10,12 +10,16 @@ tools that keep them honest.
 The mental model: plan → task → todos
 
 - **plan** — the store, `~/.opencode/plan/`.
-- **task** — one file, `active/TASK-<slug>.md`, with a title and a `## To Do`.
+- **task** — one file, `active/TASK-<slug>.md`, with a title, a `## To Do`, and an optional raw `## Notes`.
 - **todos** — checkboxes inside that task:
   `[ ]` pending, `[~]` in-progress, `[x]` done, `[!]` blocked.
 
 A task is *done* only when every box under `## To Do` is `[x]`. There is no
 status tool: you change state by editing the markdown.
+
+`## Notes` is free-form and raw: walls hit, paths ruled out, commands that were
+verified. It is never parsed or summarised — at close it is copied verbatim
+into the session report.
 
 ## Why `plan/` and `TASK-*.md`?
 
@@ -27,7 +31,7 @@ The product name is **OpenCode Task Plugin**; the vocabulary underneath is delib
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `tasks`       | Lists tasks from `session-index.json`, cross-checks `active/` for unindexed files, and prefixes the current session handoff so you read it before acting. Optional `verify: true` appends a full scan. |
 | `task_new`    | Scaffolds `active/TASK-<slug>.md` with a `## To Do` heading and registers it in the index.                                                                                                             |
-| `task_close`  | Runs `task_verify`, then archives every fully-checked task to `archive/TASK-<name>_YYYY-MM-DD[-N].md`, rebuilds the index, and appends a session-end note to the handoff.                              |
+| `task_close`  | Runs `task_verify`, then archives every fully-checked task to `archive/TASK-<name>_YYYY-MM-DD[-N].md`, rebuilds the index, writes the raw session report, and appends a session-end note + report pointer to the handoff. |
 | `task_verify` | Reports orphans, collisions, ready-to-archive tasks, and stale in-progress tasks.                                                                                                                      |
 
 ## Why the handoff matters
@@ -82,9 +86,43 @@ The `dist/` directory is committed, so a build step is usually unnecessary — t
 ~/.opencode/plan/
 ├── active/              # TASK-<slug>.md — the work
 ├── archive/             # TASK-<slug>_YYYY-MM-DD[-N].md — finished work
+├── sessions/            # YYYY-MM-DD-<slug>.md — raw session reports
 ├── session-index.json   # canonical index, rebuilt from active/ (host-local)
 └── session-handoff.md   # durable narrative written by close_task
 ```
+
+## Session reports
+
+Closing a session writes `sessions/YYYY-MM-DD-<slug>.md` — the raw record,
+derived entirely from files, with no generated prose:
+
+```
+---
+date: 2026-10-24
+status: closed
+scope: "/path/to/work/repo"     # cwd at close, or its git toplevel
+commit: "4adf5a8"               # when the cwd is a git tree
+tasks: ["TASK-<slug>.md"]
+archived: ["TASK-<slug>_2026-10-24.md"]
+---
+## Closed      checked To Do lines, per task
+## Notes       ## Notes blocks, verbatim
+## Open        still-active tasks with their status
+## Verify      verbatim task_verify output
+```
+
+Rules:
+
+- **One producer.** `task_close` / `session_close` write the report; there is
+  no separate report tool. On-demand, polished reports belong to another
+  skill that reads `sessions/` and `archive/`.
+- **Never rewritten.** Same-day collisions get `-2`, `-3`; a second close on
+  the same day produces a second report.
+- **Nothing to record → no file.** If no task was archived, no report is
+  written; the handoff note is still appended.
+- **Always visible.** `task` / `task_list` excerpt the latest report and
+  point at the file, the same way they do for the handoff — otherwise
+  reports accrete unread.
 
 ## Sync (disabled by default)
 

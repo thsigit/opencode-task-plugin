@@ -41,7 +41,10 @@ interface IndexEntry {
 }
 /** Rebuild the entire index from the active/ directory (canonical source). */
 export declare function rebuildIndex(): IndexEntry[];
-export declare function sessionDone(): string;
+export declare function sessionDone(opts?: {
+    title?: string;
+    verifyText?: string;
+}): string;
 export declare function newTask(input: {
     name: string;
     summary?: string;

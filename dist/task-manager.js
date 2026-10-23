@@ -399,9 +399,10 @@ function renderSession(input, date) {
         lines.push(block);
         lines.push("");
     }
-    if (notes === 0)
+    if (notes === 0) {
         lines.push("(none)");
-    lines.push("");
+        lines.push("");
+    }
     lines.push("## Open");
     if (input.kept.length === 0) {
         lines.push("- none");

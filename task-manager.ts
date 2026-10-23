@@ -462,8 +462,10 @@ function renderSession(input: SessionInput, date: string): string {
     lines.push(block);
     lines.push("");
   }
-  if (notes === 0) lines.push("(none)");
-  lines.push("");
+  if (notes === 0) {
+    lines.push("(none)");
+    lines.push("");
+  }
   lines.push("## Open");
   if (input.kept.length === 0) {
     lines.push("- none");

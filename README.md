@@ -25,7 +25,7 @@ The product name is **OpenCode Task Plugin**; the vocabulary underneath is delib
 
 | Tool          | What it does                                                                                                                                                                                           |
 | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `tasks`       | Lists tasks from `session-index.json`, cross-checks `active/` for unindexed files, and prefixes the current session handoff so you read it before acting. Optional `verify: true` appends a full scan. |
+| `task`        | Lists tasks from `session-index.json`, cross-checks `active/` for unindexed files, and prefixes the current session handoff so you read it before acting. Optional `verify: true` appends a full scan. |
 | `task_new`    | Scaffolds `active/TASK-<slug>.md` with a `## To Do` heading and registers it in the index.                                                                                                             |
 | `task_close`  | Runs `task_verify`, then archives every fully-checked task to `archive/TASK-<name>_YYYY-MM-DD[-N].md`, rebuilds the index, and appends a session-end note to the handoff.                              |
 | `task_verify` | Reports orphans, collisions, ready-to-archive tasks, and stale in-progress tasks.                                                                                                                      |

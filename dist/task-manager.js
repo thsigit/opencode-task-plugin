@@ -20,16 +20,26 @@ const HOME = (await import("os")).homedir();
 const BASE = path.join(HOME, ".opencode", "plan");
 const ACTIVE = path.join(BASE, "active");
 const ARCHIVE = path.join(BASE, "archive");
+const SESSIONS = path.join(BASE, "sessions");
 const HANDOFF = path.join(BASE, "session-handoff.md");
 const INDEX = path.join(BASE, "session-index.json");
+const DIARY = path.join(BASE, "session-diary.md"); // append-only session log
 // Tasks whose last edit is older than this many days and are still in-progress
 // are flagged by `verify` as stale.
 const STALE_DAYS = 7;
+const KNOWN_REPOS = [
+    { path: path.join(HOME, ".config", "opencode", "plugins", "opencode-task-plugin"), name: "opencode-task-plugin" },
+    { path: path.join(HOME, ".config", "opencode", "plugins", "opencode-google-workspace"), name: "opencode-google-workspace" },
+    { path: "/srv/repo/opencode-task-plugin", name: "opencode-task-plugin (homelab)" },
+    { path: "/srv/repo/opencode-google-workspace", name: "opencode-google-workspace (homelab)" },
+];
 // ── Prefixes ─────────────────────────────────────────────────────────────
 const TASK_PREFIX = "TASK-";
 // ── Startup guards ───────────────────────────────────────────────────────
 function ensureDirs() {
-    for (const dir of [BASE, ACTIVE, ARCHIVE]) {
+    for (const dir of [BASE, ACTIVE, ARCHIVE, SESSIONS]) {
+        if (!fs.existsSync(DIARY))
+            fs.writeFileSync(DIARY, "", "utf-8");
         if (!fs.existsSync(dir))
             fs.mkdirSync(dir, { recursive: true });
     }
@@ -180,6 +190,57 @@ function checkboxMarkers(content) {
         return [];
     return section.match(/-\s+\[(.)\]/g) || [];
 }
+/**
+ * The raw `## Notes` block of a task, minus HTML comments. Notes are copied
+ * verbatim into the session report -- no parsing, no rewriting.
+ */
+function notesSection(content) {
+    const header = /^#+\s+Notes\s*$/m.exec(content);
+    if (!header)
+        return "";
+    const level = (header[0].match(/^#+/) || [""])[0].length;
+    const afterHeader = header.index + header[0].length + 1;
+    const section = content.slice(afterHeader);
+    const nextHeader = new RegExp("^#{1," + level + "}\\s+\\S", "m").exec(section);
+    const raw = nextHeader ? section.slice(0, nextHeader.index) : section;
+    return raw.replace(/<!--[\s\S]*?-->/g, "").trim();
+}
+/**
+ * All To Do lines with their markers -- the full scope of a task.
+ * Shows what was planned, what was done, what was left.
+ */
+function allTodoLines(content) {
+    const section = todoSection(content);
+    if (!section)
+        return [];
+    return section
+        .split("\n")
+        .filter((line) => /^\s*-\s+\[.\]/.test(line))
+        .map((line) => line.trim());
+}
+/** Checked To Do lines -- the mechanical "what got done" of a task. */
+function checkedTodoLines(content) {
+    const section = todoSection(content);
+    if (!section)
+        return [];
+    return section
+        .split("\n")
+        .filter((line) => /^\s*-\s+\[x\]/.test(line))
+        .map((line) => line.trim());
+}
+/** Working directory at close time, and its repo/commit when it is a git tree. */
+function cwdScope() {
+    const cwd = process.cwd();
+    const top = spawnSync("git", ["rev-parse", "--show-toplevel"], { cwd, encoding: "utf-8", timeout: 5_000 });
+    const sha = spawnSync("git", ["rev-parse", "--short", "HEAD"], { cwd, encoding: "utf-8", timeout: 5_000 });
+    const repo = top.status === 0 ? top.stdout.trim() : "";
+    const commit = sha.status === 0 ? sha.stdout.trim() : "";
+    return { cwd, repo: repo || null, commit: commit || null };
+}
+/** YAML flow list of JSON-quoted strings (valid YAML, no escaping edge cases). */
+function yamlList(items) {
+    return `[${items.map((item) => JSON.stringify(item)).join(", ")}]`;
+}
 /** A task is "done" (ready to archive) only when every To Do box is [x]. */
 function isDone(filePath) {
     const markers = checkboxMarkers(fs.readFileSync(filePath, "utf-8"));
@@ -229,15 +290,19 @@ function todayISO() {
 function isoStamp(d) {
     return d.toISOString();
 }
-/** A free archive destination for `name` on `date`, collision-safe. */
-function archiveDest(name, date) {
-    let candidate = `${archiveBaseName(name, date)}.md`;
+/** A free `<base>.md`, `<base>-2.md`, ... in `dir`; collision-safe, never overwrites. */
+function uniqueFile(dir, baseName) {
+    let candidate = `${baseName}.md`;
     let i = 2;
-    while (fs.existsSync(path.join(ARCHIVE, candidate))) {
-        candidate = `${archiveBaseName(name, date)}-${i}.md`;
+    while (fs.existsSync(path.join(dir, candidate))) {
+        candidate = `${baseName}-${i}.md`;
         i++;
     }
     return candidate;
+}
+/** A free archive destination for `name` on `date`, collision-safe. */
+function archiveDest(name, date) {
+    return uniqueFile(ARCHIVE, archiveBaseName(name, date));
 }
 function statTimes(filePath) {
     try {
@@ -296,8 +361,238 @@ function appendHandoff(block) {
         console.error(`WARN: could not append to handoff: ${e.message}`);
     }
 }
+function readDiary(since) {
+    try {
+        const content = fs.readFileSync(DIARY, "utf-8");
+        return content.trim().split("\n")
+            .filter(Boolean)
+            .map((l) => JSON.parse(l))
+            .filter((e) => !since || e.ts >= since);
+    }
+    catch {
+        return [];
+    }
+}
+/** Get git commits since `since` ISO timestamp from known repos. */
+function gitCommitsSince(since) {
+    const entries = [];
+    for (const repo of KNOWN_REPOS) {
+        if (!fs.existsSync(repo.path))
+            continue;
+        const log = spawnSync("git", ["log", "--since", since, "--pretty=format:%H|%s|%ci", "--no-merges"], {
+            cwd: repo.path, encoding: "utf-8", timeout: 10_000
+        });
+        if (log.status !== 0)
+            continue;
+        for (const line of log.stdout.trim().split("\n").filter(Boolean)) {
+            const [sha, msg, date] = line.split("|", 3);
+            entries.push({
+                ts: date,
+                type: "git",
+                repo: repo.name,
+                commit: sha.slice(0, 8),
+                message: msg,
+                cwd: repo.path,
+            });
+        }
+    }
+    entries.sort((a, b) => a.ts.localeCompare(b.ts));
+    return entries;
+}
+/** Date-first slug; explicit title wins, else the first closed task name. */
+function sessionSlug(title, archivedNames) {
+    if (title?.trim())
+        return slugify(title);
+    const first = archivedNames[0];
+    if (first)
+        return slugify(stripPrefix(first).replace(/_\d{4}-\d{2}-\d{2}(-\d+)?\.md$/, ""));
+    return "session";
+}
+/**
+ * Render the raw report. Everything here is derived from files: checked To Do
+ * lines, verbatim `## Notes`, the still-active tasks, and the verify output.
+ * No prose is generated -- summarising is another tool's job.
+ */
+function renderSession(input, date) {
+    const scope = cwdScope();
+    const archivedNames = input.archived.map((a) => a.name);
+    const archivedFiles = input.archived.map((a) => a.dest);
+    const heading = input.title?.trim() || stripPrefix(archivedNames[0] ?? "session").replace(/_/g, " ");
+    const lines = [];
+    lines.push("---");
+    lines.push(`date: ${date}`);
+    lines.push("status: closed");
+    lines.push(`scope: ${JSON.stringify(scope.repo ?? scope.cwd)}`);
+    if (scope.commit)
+        lines.push(`commit: ${scope.commit}`);
+    lines.push(`tasks: ${yamlList(archivedNames)}`);
+    lines.push(`archived: ${yamlList(archivedFiles)}`);
+    lines.push("---");
+    lines.push("");
+    lines.push(`# ${heading}`);
+    lines.push("");
+    lines.push("## Closed");
+    if (input.archived.length === 0) {
+        lines.push("- none");
+    }
+    else {
+        for (const entry of input.archived) {
+            const content = fs.readFileSync(path.join(ARCHIVE, entry.dest), "utf-8");
+            lines.push(`### ${entry.name}`);
+            const all = allTodoLines(content);
+            if (all.length === 0)
+                lines.push("- (no To Do items)");
+            for (const line of all)
+                lines.push(line);
+            lines.push("");
+        }
+    }
+    lines.push("## Notes");
+    let notes = 0;
+    for (const entry of input.archived) {
+        const content = fs.readFileSync(path.join(ARCHIVE, entry.dest), "utf-8");
+        const block = notesSection(content);
+        if (!block)
+            continue;
+        notes++;
+        lines.push(`### ${entry.name}`);
+        lines.push(block);
+        lines.push("");
+    }
+    if (notes === 0) {
+        lines.push("(none)");
+        lines.push("");
+    }
+    lines.push("## Open");
+    if (input.kept.length === 0) {
+        lines.push("- none");
+    }
+    else {
+        for (const name of input.kept) {
+            const filePath = path.join(ACTIVE, name);
+            const status = fs.existsSync(filePath) ? deriveStatus(filePath) : "unknown";
+            lines.push(`- ${name} [${status}]`);
+        }
+    }
+    lines.push("");
+    if (input.verifyText?.trim()) {
+        lines.push("## Verify");
+        lines.push("```");
+        lines.push(input.verifyText.trim());
+        lines.push("```");
+        lines.push("");
+    }
+    return lines.join("\n");
+}
+/** Write the report; returns its path relative to BASE, or null when there is nothing to record. */
+function writeSessionReport(input, date) {
+    if (input.archived.length === 0)
+        return null;
+    const base = `${date}-${sessionSlug(input.title, input.archived.map((a) => a.name))}`;
+    const file = uniqueFile(SESSIONS, base);
+    fs.writeFileSync(path.join(SESSIONS, file), renderSession(input, date), "utf-8");
+    return `sessions/${file}`;
+}
+/** Render a session diary report from diary entries + git commits. */
+function renderDiaryReport(entries, date, title) {
+    const shell = entries.filter((e) => e.type === "shell");
+    const git = entries.filter((e) => e.type === "git");
+    const tools = entries.filter((e) => e.type === "tool");
+    const notes = entries.filter((e) => e.type === "note");
+    const summaries = entries.filter((e) => e.type === "summary");
+    const scope = cwdScope();
+    const lines = [];
+    lines.push("---");
+    lines.push(`date: ${date}`);
+    lines.push("status: diary");
+    lines.push(`scope: ${JSON.stringify(scope.repo ?? scope.cwd)}`);
+    if (scope.commit)
+        lines.push(`commit: ${scope.commit}`);
+    lines.push(`entries: ${entries.length} (shell:${shell.length} git:${git.length} tools:${tools.length} notes:${notes.length})`);
+    lines.push("---");
+    lines.push("");
+    lines.push(`# ${title ?? "Session diary " + date}`);
+    lines.push("");
+    if (summaries.length > 0) {
+        lines.push("## Summary");
+        for (const s of summaries)
+            lines.push(s.text ?? "");
+        lines.push("");
+    }
+    if (git.length > 0) {
+        lines.push("## Git Commits");
+        const byRepo = {};
+        for (const g of git)
+            (byRepo[g.repo ?? "unknown"] ??= []).push(g);
+        for (const [repo, commits] of Object.entries(byRepo)) {
+            lines.push(`### ${repo}`);
+            for (const c of commits)
+                lines.push(`- ${c.commit} ${c.message} (${c.ts.slice(0, 19).replace("T", " ")})`);
+            lines.push("");
+        }
+    }
+    if (tools.length > 0) {
+        lines.push("## Tool Calls");
+        for (const t of tools)
+            lines.push(`- ${t.tool}(${t.args ?? ""}) @ ${t.ts.slice(0, 19).replace("T", " ")}`);
+        lines.push("");
+    }
+    if (shell.length > 0) {
+        lines.push("## Shell Commands");
+        for (const s of shell)
+            lines.push(`- ${s.command} @ ${s.ts.slice(0, 19).replace("T", " ")} ${s.cwd ? " in " + s.cwd : ""}`);
+        lines.push("");
+    }
+    if (notes.length > 0) {
+        lines.push("## Notes");
+        for (const n of notes)
+            lines.push(`- ${n.text} @ ${n.ts.slice(0, 19).replace("T", " ")}`);
+        lines.push("");
+    }
+    return lines.join("\n");
+}
+/** Write a session diary report from accumulated diary entries. */
+export function sessionDiary(opts = {}) {
+    const date = todayISO();
+    const since = opts.since ?? date + "T00:00:00";
+    const diaryEntries = readDiary(since);
+    const gitEntries = gitCommitsSince(since);
+    const all = [...diaryEntries, ...gitEntries].sort((a, b) => a.ts.localeCompare(b.ts));
+    if (all.length === 0)
+        return "No activity recorded since " + since;
+    const report = renderDiaryReport(all, date, opts.title);
+    const file = uniqueFile(SESSIONS, `${date}-diary-${opts.title ? slugify(opts.title) : "session"}`);
+    fs.writeFileSync(path.join(SESSIONS, file), report, "utf-8");
+    appendHandoff(`## Session diary (${date})\n- Diary report: sessions/${file}\n- Entries: ${all.length}\n`);
+    return `Session diary written: sessions/${file} (${all.length} entries)`;
+}
 // ── Archive / Move Logic ─────────────────────────────────────────────────
-export function sessionDone() {
+/**
+ * Classify a task's To Do state for diagnostics.
+ */
+function classifyTodoState(filePath) {
+    const content = fs.readFileSync(filePath, "utf-8");
+    const all = allTodoLines(content);
+    const checked = all.filter((l) => l.includes("[x]"));
+    const unchecked = all.filter((l) => !l.includes("[x]"));
+    if (all.length === 0)
+        return { status: "no-todos", total: 0, checked: 0, unchecked: [] };
+    if (unchecked.length === 0)
+        return { status: "done", total: all.length, checked: checked.length, unchecked: [] };
+    if (checked.length === 0)
+        return { status: "pending", total: all.length, checked: 0, unchecked };
+    return { status: "partial", total: all.length, checked: checked.length, unchecked };
+}
+export function appendDiary(entry) {
+    try {
+        const line = JSON.stringify(entry);
+        fs.appendFileSync(DIARY, line + "\n", "utf-8");
+    }
+    catch (e) {
+        console.error(`WARN: could not append to diary: ${e.message}`);
+    }
+}
+export function sessionDone(opts = {}) {
     const date = todayISO();
     const archived = [];
     const kept = [];
@@ -338,12 +633,39 @@ export function sessionDone() {
     }
     lines.push(`\nArchived: ${archived.map((a) => a.dest).join(", ") || "none"}`);
     lines.push(`Remaining: ${kept.join(", ") || "none"}`);
+    // Diagnostic: show partially-done tasks that blocked archiving
+    const partial = kept
+        .map((name) => {
+        const fp = path.join(ACTIVE, name);
+        const c = classifyTodoState(fp);
+        return c.status === "partial" ? `${name} (${c.checked}/${c.total} done, ${c.unchecked.length} left)` : null;
+    })
+        .filter(Boolean);
+    if (partial.length > 0) {
+        lines.push("");
+        lines.push("Partially completed (not archived):");
+        for (const p of partial)
+            lines.push(`  - ${p}`);
+    }
     rebuildIndex();
+    // Raw session report: derived from the files, never summarised. A failure
+    // here must not fail the close -- the archive already happened.
+    let reportPath = null;
+    try {
+        reportPath = writeSessionReport({ title: opts.title, verifyText: opts.verifyText, archived, kept }, date);
+    }
+    catch (e) {
+        console.error(`WARN: could not write session report: ${e.message}`);
+    }
     // Append a short session-end note to the handoff prose.
     const stamp = todayISO();
     appendHandoff(`## Session archived (${stamp})\n\n` +
         `- Archived ${archived.length} task(s)${archived.length ? ": " + archived.map((a) => a.dest).join(", ") : ""}.\n` +
-        `- Remaining ${kept.length} active task(s).\n`);
+        `- Remaining ${kept.length} active task(s).\n` +
+        (reportPath ? `- Session report: ${reportPath}.\n` : ""));
+    if (reportPath) {
+        lines.push(`\nSession report: ${reportPath}`);
+    }
     // Publish the session's work to the remote. Non-fatal: a sync failure is
     // a warning, never a blocker — the archive already happened locally.
     const syncMsg = pushTasks();
@@ -375,7 +697,9 @@ export function newTask(input) {
     const body = `# ${title}\n\n` +
         `**Created:** ${isoStamp(new Date())}\n\n` +
         `## To Do\n` +
-        `- ${statusMarker} ${firstTodo}\n`;
+        `- ${statusMarker} ${firstTodo}\n\n` +
+        `## Notes\n\n` +
+        `<!-- raw: walls, ruled-out paths, verified commands. Copied verbatim into the session report at session_close. -->\n`;
     fs.writeFileSync(filePath, body, "utf-8");
     rebuildIndex();
     return `Created active/${file} and registered it in session-index.json.`;
@@ -437,54 +761,8 @@ export function verify() {
 // ── Tasks List Logic ─────────────────────────────────────────────────────
 /**
  * Summarise the head of session-handoff.md for the `tasks` tool.
- *
- * WHY THIS EXISTS
- *   `tasks` is the first tool a new session reaches for, and until 2026-09-30 it
- *   returned a bare task list. session-handoff.md is the only durable record of
- *   what the previous session actually established — the traps, the retractions,
- *   the pinned errors in a spec — and nothing read it. plan-manager only ever
- *   *appended* to it. That is how three copies of it went stale simultaneously
- *   while the tool that should have surfaced it reported a healthy task list.
- *
- * WHAT IT DOES AND DOES NOT DO
- *   It prints a bounded excerpt, never the whole file. A handoff can run to
- *   tens of KB, and `tasks` is called often; dumping it whole would be a context
- *   tax on every call for a document that matters once, at session start. So:
- *   the title block, the most recent section headings, and a pointer to the
- *   path. The agent reads the file itself when it needs the rest.
- *
- *   HEADING TOLERANCE — WHY THIS HAS FALLBACKS
- *   The first version matched exactly two markers: a `**Date:**` line and
- *   `## <n>.` headings. Both are conventions, not requirements, and nothing
- *   enforced them. The 2026-10-01 SSH session wrote a handoff in a different
- *   shape — `# Handoff: ...`, then `## Overview` / `## Work Completed` /
- *   `### 1. ...` — and the whole block silently vanished from `tasks` while the
- *   6.8 KB of content sat on disk unread. Same failure class as the original
- *   bug: a reader that cannot see the thing it exists to surface, failing
- *   quietly.
- *
- *   So the reader degrades instead of giving up. It tries, in order:
- *     1. `**Date:**` line and `## <n>.` headings (canonical)
- *     2. any `## ` heading at all, de-duplicated
- *     3. a bare pointer with the byte count — better one line than nothing
- *   A writer choosing a different heading style can no longer break the reader.
- *
- *   A missing or empty handoff is normal (a host that has never run
- *   close_task). It is reported as one line and never treated as an error —
- *   this must not become a new thing that fails.
- *
- *   WORDING — WHY THE POINTER IS AN IMPERATIVE ADDRESSED TO THE AGENT
- *   The first version's pointer read "read it before acting on the tasks
- *   below" as embedded prose inside a descriptive summary. On 2026-10-09 an
- *   agent hit that line, treated it as narration to relay to the user ("Read
- *   session-handoff.md before acting on tasks — do you want me to?"), and
- *   presented the task list without ever opening the file — the exact
- *   read-the-handoff behaviour this block exists to cause. Prose addressed to
- *   no one in particular gets quoted, not obeyed. So the output now names its
- *   addressee (the agent, not the user), demands the action explicitly before
- *   the task list is shown, and calls out relaying the pointer as the failure
- *   mode. If this line is ever "improved", keep it an instruction to the
- *   reader, not a description of one.
+ * Prints a bounded excerpt (title, recent headings, path pointer).
+ * The agent reads the full file separately when needed.
  */
 function handoffSummary() {
     if (!fs.existsSync(HANDOFF))
@@ -561,6 +839,48 @@ function dedupeHeadings(titles) {
     }
     return out;
 }
+/** Newest report by date-first filename, or null when none exists. */
+function latestSessionFile() {
+    try {
+        const files = fs.readdirSync(SESSIONS).filter((f) => f.endsWith(".md")).sort();
+        return files.length > 0 ? path.join(SESSIONS, files[files.length - 1]) : null;
+    }
+    catch {
+        return null;
+    }
+}
+/**
+ * Bounded excerpt of the most recent session report. Same intent as the
+ * handoff excerpt: the next session has to SEE that the record exists, or
+ * reports accrete unread.
+ */
+function sessionSummary() {
+    const filePath = latestSessionFile();
+    if (!filePath)
+        return null;
+    let text;
+    try {
+        text = fs.readFileSync(filePath, "utf-8");
+    }
+    catch {
+        return null;
+    }
+    const title = (text.split("\n").find((l) => l.startsWith("# ")) ?? "").replace(/^#\s*/, "").trim();
+    const sections = text
+        .split("\n")
+        .filter((l) => /^##\s+\S/.test(l))
+        .map((l) => l.replace(/^##\s+/, "").trim());
+    const out = [
+        "## Latest Session Report — AGENT ACTION REQUIRED: read the report file before acting",
+        `- file: ${filePath}`,
+        `- title: ${title || "(untitled)"}`,
+    ];
+    if (sections.length > 0)
+        out.push(`- sections: ${sections.slice(0, 6).join(", ")}`);
+    out.push("Read it with the read tool. It is the raw record of the last closed session: " +
+        "closed tasks, verbatim notes, open work and verify output.");
+    return out.join("\n");
+}
 export function listTasks() {
     // Pull the latest task changes from the remote so a new session always sees
     // the current task list. Non-fatal: a sync failure is a warning, never a
@@ -591,6 +911,13 @@ export function listTasks() {
     const handoff = handoffSummary();
     if (handoff) {
         lines.push(handoff);
+        lines.push("");
+        lines.push("---");
+        lines.push("");
+    }
+    const session = sessionSummary();
+    if (session) {
+        lines.push(session);
         lines.push("");
         lines.push("---");
         lines.push("");

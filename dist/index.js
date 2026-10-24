@@ -4,14 +4,14 @@
  * Exposes tools:
  *  - task:         list active plans from session-index.json, cross-check active/ for unindexed files
  *  - task_new:     scaffold a new active/TASK-<name>.md with a To Do template and register it in the index
- *  - close_task:   archive completed plans, regenerate index, append a session-end note to the handoff
+ *  - close_task:   archive completed plans, regenerate index, write the raw session report
  *  - verify:       report orphans, collisions, ready-to-archive, and stale in-progress plans
- *  - session_close: safely close a session by verifying then archiving completed tasks
+ *  - session_close: safely close a session: verify, archive, write the raw session report
  *  - task_triage:  suggest next task to work on based on status and staleness
  *  - task_claim_audit: audit task claims against disk/git/process state
  */
 import { Plugin } from "@opencode/plugin";
-import { sessionDone, verify, listTasks, newTask, rebuildIndex, configureSync } from "./task-manager.js";
+import { sessionDone, sessionDiary, appendDiary, verify, listTasks, newTask, rebuildIndex, configureSync } from "./task-manager.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdirSync, readdirSync, copyFileSync } from "node:fs";
@@ -140,13 +140,13 @@ export default Plugin.define({
                 name: "task_close",
                 description: "Verify tasks (orphans, collisions, ready-to-archive, stale), then archive all completed tasks " +
                     "(every checkbox in ## To Do is - [x]) by moving them from active/ to archive/ as " +
-                    "TASK-<name>_YYYY-MM-DD[-N].md (collision-safe), then rebuild session-index.json and " +
-                    "append a session-end note to session-handoff.md. " +
-                    "Use when the user says 'close task' or 'task done'.",
+                    "TASK-<name>_YYYY-MM-DD[-N].md (collision-safe), then rebuild session-index.json, " +
+                    "write the raw session report to sessions/YYYY-MM-DD-<slug>.md and append a session-end " +
+                    "note to session-handoff.md. Use when the user says 'close task' or 'task done'.",
                 input: { type: "object", properties: {}, additionalProperties: false },
                 async execute() {
                     const verifyResult = verify();
-                    const archiveResult = sessionDone();
+                    const archiveResult = sessionDone({ verifyText: verifyResult });
                     return { content: verifyResult + "\n\n" + archiveResult };
                 },
             });
@@ -162,15 +162,62 @@ export default Plugin.define({
             });
             editor.add({
                 name: "session_close",
-                description: "Safely close a session: run verify first, abort on orphans/collisions, then archive all completed tasks and append a session-end note to session-handoff.md.",
-                input: { type: "object", properties: {}, additionalProperties: false },
-                async execute() {
+                description: "Safely close a session: run verify first, abort on orphans/collisions, then archive all " +
+                    "completed tasks, rebuild the index, and write a raw session report to " +
+                    "sessions/YYYY-MM-DD-<slug>.md (from checked To Do items and each task's verbatim ## Notes), " +
+                    "plus a session-end note and report pointer in session-handoff.md. Optional title names the file.",
+                input: {
+                    type: "object",
+                    properties: {
+                        title: { type: "string", description: "Optional report title; also the filename slug" },
+                    },
+                    additionalProperties: false,
+                },
+                async execute(input) {
+                    const { title } = (input ?? {});
                     const v = verify();
                     if (v.includes("ORPHAN") || v.includes("COLLISION")) {
                         return { content: "SESSION CLOSE ABORTED:\n" + v + "\n\nResolve orphans/collisions before closing." };
                     }
-                    const r = sessionDone();
+                    const r = sessionDone({ title, verifyText: v });
                     return { content: v + "\n\n" + r };
+                },
+            });
+            editor.add({
+                name: "session_diary",
+                description: "Write a session diary report from shell history, git commits (known repos), and explicit notes. " +
+                    "Use when the session had activity outside the task workflow (e.g. SSH work, shell commands). " +
+                    "Optional 'since' (ISO timestamp) limits entries; optional 'title' names the file.",
+                input: {
+                    type: "object",
+                    properties: {
+                        title: { type: "string", description: "Optional report title; also the filename slug" },
+                        since: { type: "string", description: "ISO timestamp; entries since this time (default: today 00:00)" },
+                    },
+                    additionalProperties: false,
+                },
+                async execute(input) {
+                    const { title, since } = (input ?? {});
+                    const r = sessionDiary({ title, since });
+                    return { content: r };
+                },
+            });
+            editor.add({
+                name: "session_note",
+                description: "Append a manual note to the session diary (session-diary.md). " +
+                    "Use for capturing context, decisions, or summaries that aren't in tasks or shell history.",
+                input: {
+                    type: "object",
+                    properties: {
+                        text: { type: "string", description: "Note text to append" },
+                    },
+                    required: ["text"],
+                    additionalProperties: false,
+                },
+                async execute(input) {
+                    const { text } = input;
+                    appendDiary({ ts: new Date().toISOString(), type: "note", text });
+                    return { content: "Note added to session diary." };
                 },
             });
             editor.add({

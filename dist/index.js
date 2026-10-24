@@ -11,7 +11,7 @@
  *  - task_claim_audit: audit task claims against disk/git/process state
  */
 import { Plugin } from "@opencode/plugin";
-import { sessionDone, sessionDiary, verify, listTasks, newTask, rebuildIndex, configureSync } from "./task-manager.js";
+import { sessionDone, sessionDiary, appendDiary, verify, listTasks, newTask, rebuildIndex, configureSync } from "./task-manager.js";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
 import { existsSync, mkdirSync, readdirSync, copyFileSync } from "node:fs";
@@ -200,6 +200,24 @@ export default Plugin.define({
                     const { title, since } = (input ?? {});
                     const r = sessionDiary({ title, since });
                     return { content: r };
+                },
+            });
+            editor.add({
+                name: "session_note",
+                description: "Append a manual note to the session diary (session-diary.md). " +
+                    "Use for capturing context, decisions, or summaries that aren't in tasks or shell history.",
+                input: {
+                    type: "object",
+                    properties: {
+                        text: { type: "string", description: "Note text to append" },
+                    },
+                    required: ["text"],
+                    additionalProperties: false,
+                },
+                async execute(input) {
+                    const { text } = input;
+                    appendDiary({ ts: new Date().toISOString(), type: "note", text });
+                    return { content: "Note added to session diary." };
                 },
             });
             editor.add({

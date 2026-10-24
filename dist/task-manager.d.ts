@@ -12,6 +12,18 @@
  *      [x]  completed   (all boxes [x] => task is archived by `session is done`)
  *      [!]  blocked
  */
+interface DiaryEntry {
+    ts: string;
+    type: "shell" | "git" | "tool" | "note" | "summary";
+    cwd?: string;
+    repo?: string;
+    commit?: string;
+    message?: string;
+    command?: string;
+    tool?: string;
+    args?: string;
+    text?: string;
+}
 /**
  * Turn plan-repo syncing on or off. Called by the plugin with the `sync`
  * option (default false). Safe to call at any time; from 0.1.0 the plugin
@@ -46,6 +58,7 @@ export declare function sessionDiary(opts?: {
     title?: string;
     since?: string;
 }): string;
+export declare function appendDiary(entry: DiaryEntry): void;
 export declare function sessionDone(opts?: {
     title?: string;
     verifyText?: string;

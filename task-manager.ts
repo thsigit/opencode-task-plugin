@@ -433,14 +433,6 @@ function appendHandoff(block: string): void {
   }
 }
 
-function appendDiary(entry: DiaryEntry): void {
-  try {
-    const line = JSON.stringify(entry);
-    fs.appendFileSync(DIARY, line + "\n", "utf-8");
-  } catch (e) {
-    console.error(`WARN: could not append to diary: ${(e as Error).message}`);
-  }
-}
 
 function readDiary(since?: string): DiaryEntry[] {
   try {
@@ -666,6 +658,15 @@ function classifyTodoState(filePath: string): { status: string; total: number; c
   if (unchecked.length === 0) return { status: "done", total: all.length, checked: checked.length, unchecked: [] };
   if (checked.length === 0) return { status: "pending", total: all.length, checked: 0, unchecked };
   return { status: "partial", total: all.length, checked: checked.length, unchecked };
+}
+
+export function appendDiary(entry: DiaryEntry): void {
+  try {
+    const line = JSON.stringify(entry);
+    fs.appendFileSync(DIARY, line + "\n", "utf-8");
+  } catch (e) {
+    console.error(`WARN: could not append to diary: ${(e as Error).message}`);
+  }
 }
 
 export function sessionDone(opts: { title?: string; verifyText?: string } = {}): string {

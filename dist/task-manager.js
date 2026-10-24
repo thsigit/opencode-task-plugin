@@ -196,6 +196,19 @@ function notesSection(content) {
     const raw = nextHeader ? section.slice(0, nextHeader.index) : section;
     return raw.replace(/<!--[\s\S]*?-->/g, "").trim();
 }
+/**
+ * All To Do lines with their markers -- the full scope of a task.
+ * Shows what was planned, what was done, what was left.
+ */
+function allTodoLines(content) {
+    const section = todoSection(content);
+    if (!section)
+        return [];
+    return section
+        .split("\n")
+        .filter((line) => /^\s*-\s+\[.\]/.test(line))
+        .map((line) => line.trim());
+}
 /** Checked To Do lines -- the mechanical "what got done" of a task. */
 function checkedTodoLines(content) {
     const section = todoSection(content);
@@ -379,10 +392,10 @@ function renderSession(input, date) {
         for (const entry of input.archived) {
             const content = fs.readFileSync(path.join(ARCHIVE, entry.dest), "utf-8");
             lines.push(`### ${entry.name}`);
-            const checked = checkedTodoLines(content);
-            if (checked.length === 0)
-                lines.push("- (no checked To Do items)");
-            for (const line of checked)
+            const all = allTodoLines(content);
+            if (all.length === 0)
+                lines.push("- (no To Do items)");
+            for (const line of all)
                 lines.push(line);
             lines.push("");
         }

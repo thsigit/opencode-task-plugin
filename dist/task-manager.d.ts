@@ -41,6 +41,11 @@ interface IndexEntry {
 }
 /** Rebuild the entire index from the active/ directory (canonical source). */
 export declare function rebuildIndex(): IndexEntry[];
+/** Write a session diary report from accumulated diary entries. */
+export declare function sessionDiary(opts?: {
+    title?: string;
+    since?: string;
+}): string;
 export declare function sessionDone(opts?: {
     title?: string;
     verifyText?: string;

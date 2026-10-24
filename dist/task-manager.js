@@ -23,14 +23,23 @@ const ARCHIVE = path.join(BASE, "archive");
 const SESSIONS = path.join(BASE, "sessions");
 const HANDOFF = path.join(BASE, "session-handoff.md");
 const INDEX = path.join(BASE, "session-index.json");
+const DIARY = path.join(BASE, "session-diary.md"); // append-only session log
 // Tasks whose last edit is older than this many days and are still in-progress
 // are flagged by `verify` as stale.
 const STALE_DAYS = 7;
+const KNOWN_REPOS = [
+    { path: path.join(HOME, ".config", "opencode", "plugins", "opencode-task-plugin"), name: "opencode-task-plugin" },
+    { path: path.join(HOME, ".config", "opencode", "plugins", "opencode-google-workspace"), name: "opencode-google-workspace" },
+    { path: "/srv/repo/opencode-task-plugin", name: "opencode-task-plugin (homelab)" },
+    { path: "/srv/repo/opencode-google-workspace", name: "opencode-google-workspace (homelab)" },
+];
 // ── Prefixes ─────────────────────────────────────────────────────────────
 const TASK_PREFIX = "TASK-";
 // ── Startup guards ───────────────────────────────────────────────────────
 function ensureDirs() {
     for (const dir of [BASE, ACTIVE, ARCHIVE, SESSIONS]) {
+        if (!fs.existsSync(DIARY))
+            fs.writeFileSync(DIARY, "", "utf-8");
         if (!fs.existsSync(dir))
             fs.mkdirSync(dir, { recursive: true });
     }
@@ -352,6 +361,53 @@ function appendHandoff(block) {
         console.error(`WARN: could not append to handoff: ${e.message}`);
     }
 }
+function appendDiary(entry) {
+    try {
+        const line = JSON.stringify(entry);
+        fs.appendFileSync(DIARY, line + "\n", "utf-8");
+    }
+    catch (e) {
+        console.error(`WARN: could not append to diary: ${e.message}`);
+    }
+}
+function readDiary(since) {
+    try {
+        const content = fs.readFileSync(DIARY, "utf-8");
+        return content.trim().split("\n")
+            .filter(Boolean)
+            .map((l) => JSON.parse(l))
+            .filter((e) => !since || e.ts >= since);
+    }
+    catch {
+        return [];
+    }
+}
+/** Get git commits since `since` ISO timestamp from known repos. */
+function gitCommitsSince(since) {
+    const entries = [];
+    for (const repo of KNOWN_REPOS) {
+        if (!fs.existsSync(repo.path))
+            continue;
+        const log = spawnSync("git", ["log", "--since", since, "--pretty=format:%H|%s|%ci", "--no-merges"], {
+            cwd: repo.path, encoding: "utf-8", timeout: 10_000
+        });
+        if (log.status !== 0)
+            continue;
+        for (const line of log.stdout.trim().split("\n").filter(Boolean)) {
+            const [sha, msg, date] = line.split("|", 3);
+            entries.push({
+                ts: date,
+                type: "git",
+                repo: repo.name,
+                commit: sha.slice(0, 8),
+                message: msg,
+                cwd: repo.path,
+            });
+        }
+    }
+    entries.sort((a, b) => a.ts.localeCompare(b.ts));
+    return entries;
+}
 /** Date-first slug; explicit title wins, else the first closed task name. */
 function sessionSlug(title, archivedNames) {
     if (title?.trim())
@@ -445,6 +501,79 @@ function writeSessionReport(input, date) {
     const file = uniqueFile(SESSIONS, base);
     fs.writeFileSync(path.join(SESSIONS, file), renderSession(input, date), "utf-8");
     return `sessions/${file}`;
+}
+/** Render a session diary report from diary entries + git commits. */
+function renderDiaryReport(entries, date, title) {
+    const shell = entries.filter((e) => e.type === "shell");
+    const git = entries.filter((e) => e.type === "git");
+    const tools = entries.filter((e) => e.type === "tool");
+    const notes = entries.filter((e) => e.type === "note");
+    const summaries = entries.filter((e) => e.type === "summary");
+    const scope = cwdScope();
+    const lines = [];
+    lines.push("---");
+    lines.push(`date: ${date}`);
+    lines.push("status: diary");
+    lines.push(`scope: ${JSON.stringify(scope.repo ?? scope.cwd)}`);
+    if (scope.commit)
+        lines.push(`commit: ${scope.commit}`);
+    lines.push(`entries: ${entries.length} (shell:${shell.length} git:${git.length} tools:${tools.length} notes:${notes.length})`);
+    lines.push("---");
+    lines.push("");
+    lines.push(`# ${title ?? "Session diary " + date}`);
+    lines.push("");
+    if (summaries.length > 0) {
+        lines.push("## Summary");
+        for (const s of summaries)
+            lines.push(s.text ?? "");
+        lines.push("");
+    }
+    if (git.length > 0) {
+        lines.push("## Git Commits");
+        const byRepo = {};
+        for (const g of git)
+            (byRepo[g.repo ?? "unknown"] ??= []).push(g);
+        for (const [repo, commits] of Object.entries(byRepo)) {
+            lines.push(`### ${repo}`);
+            for (const c of commits)
+                lines.push(`- ${c.commit} ${c.message} (${c.ts.slice(0, 19).replace("T", " ")})`);
+            lines.push("");
+        }
+    }
+    if (tools.length > 0) {
+        lines.push("## Tool Calls");
+        for (const t of tools)
+            lines.push(`- ${t.tool}(${t.args ?? ""}) @ ${t.ts.slice(0, 19).replace("T", " ")}`);
+        lines.push("");
+    }
+    if (shell.length > 0) {
+        lines.push("## Shell Commands");
+        for (const s of shell)
+            lines.push(`- ${s.command} @ ${s.ts.slice(0, 19).replace("T", " ")} ${s.cwd ? " in " + s.cwd : ""}`);
+        lines.push("");
+    }
+    if (notes.length > 0) {
+        lines.push("## Notes");
+        for (const n of notes)
+            lines.push(`- ${n.text} @ ${n.ts.slice(0, 19).replace("T", " ")}`);
+        lines.push("");
+    }
+    return lines.join("\n");
+}
+/** Write a session diary report from accumulated diary entries. */
+export function sessionDiary(opts = {}) {
+    const date = todayISO();
+    const since = opts.since ?? date + "T00:00:00";
+    const diaryEntries = readDiary(since);
+    const gitEntries = gitCommitsSince(since);
+    const all = [...diaryEntries, ...gitEntries].sort((a, b) => a.ts.localeCompare(b.ts));
+    if (all.length === 0)
+        return "No activity recorded since " + since;
+    const report = renderDiaryReport(all, date, opts.title);
+    const file = uniqueFile(SESSIONS, `${date}-diary-${opts.title ? slugify(opts.title) : "session"}`);
+    fs.writeFileSync(path.join(SESSIONS, file), report, "utf-8");
+    appendHandoff(`## Session diary (${date})\n- Diary report: sessions/${file}\n- Entries: ${all.length}\n`);
+    return `Session diary written: sessions/${file} (${all.length} entries)`;
 }
 // ── Archive / Move Logic ─────────────────────────────────────────────────
 /**

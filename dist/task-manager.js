@@ -447,6 +447,22 @@ function writeSessionReport(input, date) {
     return `sessions/${file}`;
 }
 // ── Archive / Move Logic ─────────────────────────────────────────────────
+/**
+ * Classify a task's To Do state for diagnostics.
+ */
+function classifyTodoState(filePath) {
+    const content = fs.readFileSync(filePath, "utf-8");
+    const all = allTodoLines(content);
+    const checked = all.filter((l) => l.includes("[x]"));
+    const unchecked = all.filter((l) => !l.includes("[x]"));
+    if (all.length === 0)
+        return { status: "no-todos", total: 0, checked: 0, unchecked: [] };
+    if (unchecked.length === 0)
+        return { status: "done", total: all.length, checked: checked.length, unchecked: [] };
+    if (checked.length === 0)
+        return { status: "pending", total: all.length, checked: 0, unchecked };
+    return { status: "partial", total: all.length, checked: checked.length, unchecked };
+}
 export function sessionDone(opts = {}) {
     const date = todayISO();
     const archived = [];
@@ -488,6 +504,20 @@ export function sessionDone(opts = {}) {
     }
     lines.push(`\nArchived: ${archived.map((a) => a.dest).join(", ") || "none"}`);
     lines.push(`Remaining: ${kept.join(", ") || "none"}`);
+    // Diagnostic: show partially-done tasks that blocked archiving
+    const partial = kept
+        .map((name) => {
+        const fp = path.join(ACTIVE, name);
+        const c = classifyTodoState(fp);
+        return c.status === "partial" ? `${name} (${c.checked}/${c.total} done, ${c.unchecked.length} left)` : null;
+    })
+        .filter(Boolean);
+    if (partial.length > 0) {
+        lines.push("");
+        lines.push("Partially completed (not archived):");
+        for (const p of partial)
+            lines.push(`  - ${p}`);
+    }
     rebuildIndex();
     // Raw session report: derived from the files, never summarised. A failure
     // here must not fail the close -- the archive already happened.

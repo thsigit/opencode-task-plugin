@@ -123,7 +123,8 @@ export default Plugin.define({
         name: "task_new",
         description:
           "Create a new task: scaffold active/TASK-<slug>.md with a '## To Do' template " +
-          "and register it in session-index.json. Use when the user asks to add a task.",
+          "and register it in session-index.json. Use when the user asks to add a task. " +
+          "Optional source/context/goals add a '**Source:**' line, a '## Context' section and a '## Goals' section.",
         input: {
           type: "object",
           properties: {
@@ -140,13 +141,32 @@ export default Plugin.define({
               enum: ["pending", "in-progress", "blocked"],
               description: "Initial status; sets the first checkbox marker ([ ], [~], or [!])",
             },
+            source: {
+              type: "string",
+              description: "Optional provenance (conversation, meeting, URL) written as a **Source:** line",
+            },
+            context: {
+              type: "string",
+              description: "Optional background written into a ## Context section",
+            },
+            goals: {
+              type: "string",
+              description: "Optional objectives written into a ## Goals section",
+            },
           },
           required: ["name"],
           additionalProperties: false,
         },
         async execute(input) {
-          const { name, summary, status } = input as { name: string; summary?: string; status?: string };
-          return { content: newTask({ name, summary, status }) };
+          const { name, summary, status, source, context, goals } = input as {
+            name: string;
+            summary?: string;
+            status?: string;
+            source?: string;
+            context?: string;
+            goals?: string;
+          };
+          return { content: newTask({ name, summary, status, source, context, goals }) };
         },
       });
 

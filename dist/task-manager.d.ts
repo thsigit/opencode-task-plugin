@@ -67,6 +67,9 @@ export declare function newTask(input: {
     name: string;
     summary?: string;
     status?: string;
+    context?: string;
+    source?: string;
+    goals?: string;
 }): string;
 export declare function verify(): string;
 export declare function listTasks(): string;

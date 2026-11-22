@@ -60,9 +60,9 @@ const TASK_PREFIX = "TASK-";
 
 function ensureDirs(): void {
   for (const dir of [BASE, ACTIVE, ARCHIVE, SESSIONS]) {
-  if (!fs.existsSync(DIARY)) fs.writeFileSync(DIARY, "", "utf-8");
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
   }
+  if (!fs.existsSync(DIARY)) fs.writeFileSync(DIARY, "", "utf-8");
 }
 ensureDirs();
 
@@ -774,7 +774,14 @@ function slugify(name: string): string {
     .replace(/^-+|-+$/g, "");
 }
 
-export function newTask(input: { name: string; summary?: string; status?: string }): string {
+export function newTask(input: {
+  name: string;
+  summary?: string;
+  status?: string;
+  context?: string;
+  source?: string;
+  goals?: string;
+}): string {
   const raw = input.name;
   if (!raw || !raw.trim()) return "ERROR: task name is required";
   const file = `${TASK_PREFIX}${slugify(raw)}.md`;
@@ -786,8 +793,11 @@ export function newTask(input: { name: string; summary?: string; status?: string
   const statusMarker = input.status === "in-progress" ? "[~]" : input.status === "blocked" ? "[!]" : "[ ]";
   const body =
     `# ${title}\n\n` +
-    `**Created:** ${isoStamp(new Date())}\n\n` +
-    `## To Do\n` +
+    `**Created:** ${isoStamp(new Date())}\n` +
+    (input.source?.trim() ? `\n**Source:** ${input.source.trim()}\n` : "") +
+    (input.context?.trim() ? `\n## Context\n\n${input.context.trim()}\n` : "") +
+    (input.goals?.trim() ? `\n## Goals\n\n${input.goals.trim()}\n` : "") +
+    `\n## To Do\n` +
     `- ${statusMarker} ${firstTodo}\n\n` +
     `## Notes\n\n` +
     `<!-- raw: walls, ruled-out paths, verified commands. Copied verbatim into the session report at session_close. -->\n`;

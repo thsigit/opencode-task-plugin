@@ -38,11 +38,11 @@ const TASK_PREFIX = "TASK-";
 // ── Startup guards ───────────────────────────────────────────────────────
 function ensureDirs() {
     for (const dir of [BASE, ACTIVE, ARCHIVE, SESSIONS]) {
-        if (!fs.existsSync(DIARY))
-            fs.writeFileSync(DIARY, "", "utf-8");
         if (!fs.existsSync(dir))
             fs.mkdirSync(dir, { recursive: true });
     }
+    if (!fs.existsSync(DIARY))
+        fs.writeFileSync(DIARY, "", "utf-8");
 }
 ensureDirs();
 function runGit(args) {
@@ -695,8 +695,11 @@ export function newTask(input) {
     const firstTodo = input.summary?.trim() || "Describe this task";
     const statusMarker = input.status === "in-progress" ? "[~]" : input.status === "blocked" ? "[!]" : "[ ]";
     const body = `# ${title}\n\n` +
-        `**Created:** ${isoStamp(new Date())}\n\n` +
-        `## To Do\n` +
+        `**Created:** ${isoStamp(new Date())}\n` +
+        (input.source?.trim() ? `\n**Source:** ${input.source.trim()}\n` : "") +
+        (input.context?.trim() ? `\n## Context\n\n${input.context.trim()}\n` : "") +
+        (input.goals?.trim() ? `\n## Goals\n\n${input.goals.trim()}\n` : "") +
+        `\n## To Do\n` +
         `- ${statusMarker} ${firstTodo}\n\n` +
         `## Notes\n\n` +
         `<!-- raw: walls, ruled-out paths, verified commands. Copied verbatim into the session report at session_close. -->\n`;
